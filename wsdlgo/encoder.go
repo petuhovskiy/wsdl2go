@@ -609,11 +609,7 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 		},{{end}}
 	}
 
-	γ := struct {
-		{{if .OpResponseDataType}}
-			{{if .RPCStyle}}M {{end}}{{.OpResponseDataType}} ` + "`xml:\"{{.OpResponseName}}\"`" + `
-		{{end}}
-	}{}
+	γ := {{.OpResponseDataType}}{}
 	if err := p.cli.RoundTripWithAction("{{.Name}}", α, &γ); err != nil {
 		return {{.RetDef}}
 	}
@@ -1401,12 +1397,17 @@ func (ge *goEncoder) genOpStructMessage(w io.Writer, d *wsdl.Definitions, name s
 			wsdlType = part.Element
 		}
 
-		ge.genElementField(w, &wsdl.Element{
+		tag := part.Element
+		if strings.HasSuffix(tag, "Response") {
+			tag = strings.TrimPrefix(tag, "tns:")
+		}
+
+		ge.genElementFieldWithCustomTag(w, &wsdl.Element{
 			XMLName: part.XMLName,
 			Name:    part.Name,
 			Type:    wsdlType,
 			// TODO: Maybe one could make guesses about nillable?
-		})
+		}, tag)
 	}
 
 	fmt.Fprintf(w, "}\n\n")
@@ -1579,6 +1580,68 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 	}
 	fmt.Fprintf(w, "%s `xml:\"%s\" json:\"%s\" yaml:\"%s\"`\n",
 		typ, tag, tag, tag)
+}
+
+func (ge *goEncoder) genElementFieldWithCustomTag(w io.Writer, el *wsdl.Element, tagName string) {
+	if el.Ref != "" {
+		ref := trimns(el.Ref)
+		nel, ok := ge.elements[ref]
+		if !ok {
+			return
+		}
+		el = nel
+	}
+	var slicetype string
+	if el.Type == "" && el.ComplexType != nil {
+		seq := el.ComplexType.Sequence
+		if seq == nil && el.ComplexType.Choice != nil {
+			seq = &wsdl.Sequence{
+				ComplexTypes: el.ComplexType.Choice.ComplexTypes,
+				Elements:     el.ComplexType.Choice.Elements,
+				Any:          el.ComplexType.Choice.Any}
+		}
+		if seq != nil {
+			if len(seq.Elements) == 1 {
+				n := el.Name
+				seqel := seq.Elements[0]
+				el = new(wsdl.Element)
+				*el = *seqel
+				slicetype = seqel.Name
+				el.Name = n
+			} else if len(seq.Any) == 1 {
+				el = &wsdl.Element{
+					Name: el.Name,
+					Type: "anysequence",
+					Min:  seq.Any[0].Min,
+					Max:  seq.Any[0].Max,
+				}
+				slicetype = el.Name
+			}
+		}
+	}
+	et := el.Type
+	if et == "" {
+		et = "string"
+	}
+	tag := el.Name
+	fmt.Fprintf(w, "%s ", goSymbol(el.Name))
+	if el.Max != "" && el.Max != "1" {
+		fmt.Fprintf(w, "[]")
+		if slicetype != "" {
+			tag = el.Name + ">" + slicetype
+		}
+	}
+	typ := ge.wsdl2goType(et)
+	if el.Nillable || el.Min == 0 {
+		tag += ",omitempty"
+		//since we add omitempty tag, we should add pointer to type.
+		//thus xmlencoder can differ not-initialized fields from zero-initialized values
+		if !strings.HasPrefix(typ, "*") {
+			typ = "*" + typ
+		}
+	}
+	fmt.Fprintf(w, "%s `xml:\"%s\" json:\"%s\" yaml:\"%s\"`\n",
+		typ, tagName, tagName, tagName)
 }
 
 func (ge *goEncoder) genAttributeField(w io.Writer, attr *wsdl.Attribute) {
